@@ -1,1 +1,6 @@
-streamlit>=1.44
+streamlit
+pandas
+openpyxl
+gspread
+google-auth
+python-docx
