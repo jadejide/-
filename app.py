@@ -1,14 +1,24 @@
 import json
 from datetime import datetime
 from io import BytesIO
+from typing import Dict, Any, List
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
+from docx import Document
+
+try:
+    import gspread
+except Exception:  # pragma: no cover
+    gspread = None
 
 st.set_page_config(page_title="“模型观念”素养测量指标体系专家调查问卷", layout="wide")
 
 st.title("“模型观念”素养测量指标体系专家调查问卷")
 st.caption("德尔菲法第一轮专家咨询问卷（Streamlit 单页版）")
+
+ADMIN_EMAIL = st.secrets.get("admin", {}).get("email", "") if hasattr(st, "secrets") else ""
 
 st.markdown(
     """
@@ -16,7 +26,9 @@ st.markdown(
 - 本问卷仅用于学术研究，采取匿名统计方式。
 - 请结合理论认识与实践经验独立判断。
 - 评分采用 5 级量表：5=非常认可，4=比较认可，3=一般，2=不太认可，1=非常不认可。
-- 提交后可下载本次填写结果（JSON / Excel）。
+- 提交后可下载本次填写结果（JSON / Excel / Word）。
+- 如已配置 Google Sheets，提交结果会自动汇总到在线总表。
+- 如未配置在线总表，老师可直接下载 Excel/Word 后发送到指定邮箱。
 """
 )
 
@@ -95,7 +107,7 @@ kp_name = {code: name for code, name, _, _ in key_performances}
 dim_name = {d["code"]: d["name"] for d in second_dimensions}
 
 
-def build_excel_bytes(result: dict) -> bytes:
+def build_excel_bytes(result: Dict[str, Any]) -> bytes:
     basic_rows = []
     basic_info = result["basic_info"]
     for key, value in basic_info.items():
@@ -159,7 +171,7 @@ def build_excel_bytes(result: dict) -> bytes:
         pd.DataFrame(evidence_overall_rows).to_excel(writer, sheet_name="证据总体意见", index=False)
         pd.DataFrame(overall_rows).to_excel(writer, sheet_name="总体意见", index=False)
 
-        for sheet_name, worksheet in writer.sheets.items():
+        for _, worksheet in writer.sheets.items():
             for column_cells in worksheet.columns:
                 max_length = 0
                 column_letter = column_cells[0].column_letter
@@ -170,6 +182,165 @@ def build_excel_bytes(result: dict) -> bytes:
 
     output.seek(0)
     return output.getvalue()
+
+
+def build_word_bytes(result: Dict[str, Any]) -> bytes:
+    doc = Document()
+    doc.add_heading("“模型观念”素养测量指标体系专家调查问卷填写结果", level=1)
+    doc.add_paragraph(f"提交时间：{result['submitted_at']}")
+
+    doc.add_heading("一、专家基本信息", level=2)
+    for key, value in result["basic_info"].items():
+        if key == "judgement_basis":
+            continue
+        doc.add_paragraph(f"{key}：{value}")
+    doc.add_paragraph("判断依据：")
+    for key, value in result["basic_info"]["judgement_basis"].items():
+        doc.add_paragraph(f"- {key}：{value}")
+
+    doc.add_heading("二、二级维度咨询", level=2)
+    for code, item in result["second_dimensions"].items():
+        doc.add_paragraph(f"{code} {item['name']}")
+        doc.add_paragraph(f"重要性：{item['importance']}；独立性：{item['independence']}")
+        if item["suggestion"]:
+            doc.add_paragraph(f"修改意见：{item['suggestion']}")
+
+    doc.add_heading("三、关键表现咨询", level=2)
+    for code, item in result["key_performances"].items():
+        doc.add_paragraph(f"{code} {item['name']}（所属维度：{item['dimension']}）")
+        doc.add_paragraph(f"适切性：{item['appropriateness']}；一致性：{item['consistency']}")
+        if item["suggestion"]:
+            doc.add_paragraph(f"修改意见：{item['suggestion']}")
+
+    doc.add_heading("关键表现总体意见", level=3)
+    for key, value in result["key_performance_overall"].items():
+        doc.add_paragraph(f"{key}：{value}")
+
+    doc.add_heading("四、可观测证据咨询", level=2)
+    for code, item in result["evidence"].items():
+        doc.add_paragraph(f"{code}（{item['key_performance']}）{item['description']}")
+        doc.add_paragraph(f"代表性：{item['representative']}；可观测性：{item['observable']}")
+        if item["suggestion"]:
+            doc.add_paragraph(f"修改意见：{item['suggestion']}")
+
+    doc.add_heading("可观测证据总体意见", level=3)
+    for key, value in result["evidence_overall"].items():
+        doc.add_paragraph(f"{key}：{value}")
+
+    doc.add_heading("五、总体意见", level=2)
+    for key, value in result["overall_comments"].items():
+        doc.add_paragraph(f"{key}：{value}")
+
+    output = BytesIO()
+    doc.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+def flatten_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    row: Dict[str, Any] = {"submitted_at": result["submitted_at"]}
+
+    for key, value in result["basic_info"].items():
+        if key == "judgement_basis":
+            continue
+        row[f"basic__{key}"] = value
+
+    for key, value in result["basic_info"]["judgement_basis"].items():
+        row[f"basis__{key}"] = value
+
+    for code, item in result["second_dimensions"].items():
+        row[f"second__{code}__importance"] = item["importance"]
+        row[f"second__{code}__independence"] = item["independence"]
+        row[f"second__{code}__suggestion"] = item["suggestion"]
+
+    for code, item in result["key_performances"].items():
+        row[f"kp__{code}__appropriateness"] = item["appropriateness"]
+        row[f"kp__{code}__consistency"] = item["consistency"]
+        row[f"kp__{code}__suggestion"] = item["suggestion"]
+
+    for key, value in result["key_performance_overall"].items():
+        row[f"kp_overall__{key}"] = value
+
+    for code, item in result["evidence"].items():
+        row[f"evidence__{code}__representative"] = item["representative"]
+        row[f"evidence__{code}__observable"] = item["observable"]
+        row[f"evidence__{code}__suggestion"] = item["suggestion"]
+
+    for key, value in result["evidence_overall"].items():
+        row[f"evidence_overall__{key}"] = value
+
+    for key, value in result["overall_comments"].items():
+        row[f"overall__{key}"] = value
+
+    return row
+
+
+def get_gsheet_config() -> Dict[str, str]:
+    google_sheet = st.secrets.get("google_sheet", {}) if hasattr(st, "secrets") else {}
+    return {
+        "spreadsheet_id": google_sheet.get("spreadsheet_id", ""),
+        "worksheet_name": google_sheet.get("worksheet_name", "responses"),
+    }
+
+
+@st.cache_resource
+def get_gspread_client():
+    if gspread is None:
+        raise RuntimeError("缺少 gspread 依赖。")
+    if "gcp_service_account" not in st.secrets:
+        raise RuntimeError("未检测到 gcp_service_account secrets 配置。")
+    return gspread.service_account_from_dict(dict(st.secrets["gcp_service_account"]))
+
+
+def append_result_to_gsheet(result: Dict[str, Any]) -> str:
+    cfg = get_gsheet_config()
+    spreadsheet_id = cfg["spreadsheet_id"].strip()
+    worksheet_name = cfg["worksheet_name"].strip() or "responses"
+
+    if not spreadsheet_id:
+        raise RuntimeError("未配置 google_sheet.spreadsheet_id。")
+
+    gc = get_gspread_client()
+    sh = gc.open_by_key(spreadsheet_id)
+    try:
+        ws = sh.worksheet(worksheet_name)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=worksheet_name, rows=1000, cols=300)
+
+    row = flatten_result(result)
+    headers: List[str] = list(row.keys())
+    values = [row.get(h, "") for h in headers]
+
+    existing_headers = ws.row_values(1)
+    if not existing_headers:
+        ws.append_row(headers, value_input_option="USER_ENTERED")
+        ws.append_row(values, value_input_option="USER_ENTERED")
+    else:
+        if existing_headers != headers:
+            raise RuntimeError("Google Sheets 表头与当前问卷字段不一致。请新建工作表，或清空现有工作表后重试。")
+        ws.append_row(values, value_input_option="USER_ENTERED")
+
+    return worksheet_name
+
+
+def build_mailto_link(admin_email: str, submitted_at: str) -> str:
+    subject = quote(f"模型观念问卷结果 {submitted_at}")
+    body = quote(
+        "老师您好，\n\n已填写完成问卷。请将本页面下载的 Excel 或 Word 文件作为附件发送给我。\n\n谢谢！"
+    )
+    return f"mailto:{admin_email}?subject={subject}&body={body}"
+
+
+sheet_cfg = get_gsheet_config()
+with st.expander("管理员提示", expanded=False):
+    if sheet_cfg["spreadsheet_id"] and "gcp_service_account" in st.secrets:
+        st.success(f"已检测到 Google Sheets 自动汇总配置，目标工作表：{sheet_cfg['worksheet_name'] or 'responses'}")
+    else:
+        st.info("当前未配置 Google Sheets 自动汇总。推荐使用“导出 Excel/Word 后发邮箱”的方式收集。")
+    if ADMIN_EMAIL:
+        st.info(f"当前收件邮箱：{ADMIN_EMAIL}")
+    else:
+        st.warning("尚未配置收件邮箱。可在 Streamlit secrets 中添加 [admin] email = '你的邮箱'。")
 
 
 with st.form("survey_form"):
@@ -300,14 +471,31 @@ if submitted:
         },
     }
 
-    st.success("提交成功。你可以在下方查看和下载本次填写结果。")
+    st.success("提交成功。")
+
+    sheet_ok = False
+    try:
+        worksheet_name = append_result_to_gsheet(result)
+        sheet_ok = True
+        st.success(f"本次填写结果已自动汇总到 Google Sheets 工作表：{worksheet_name}")
+    except Exception:
+        pass
+
+    if not sheet_ok:
+        if ADMIN_EMAIL:
+            st.info(f"当前未启用自动汇总。请下载下方 Excel 或 Word 文件，并发送至：{ADMIN_EMAIL}")
+            st.markdown(f"[点击打开邮件客户端发邮件]({build_mailto_link(ADMIN_EMAIL, result['submitted_at'])})")
+        else:
+            st.warning("当前未启用自动汇总，也未配置收件邮箱。建议管理员在 secrets 中添加邮箱。")
+
     st.subheader("提交结果预览")
     st.json(result)
 
     json_bytes = json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8")
     excel_bytes = build_excel_bytes(result)
+    word_bytes = build_word_bytes(result)
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.download_button(
             label="下载填写结果（JSON）",
@@ -322,5 +510,17 @@ if submitted:
             file_name="model_literacy_survey_response.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+    with col3:
+        st.download_button(
+            label="下载填写结果（Word）",
+            data=word_bytes,
+            file_name="model_literacy_survey_response.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+    if sheet_ok:
+        st.info("你后续只需打开 Google Sheets 总表，就能看到所有老师的累计提交数据。")
+    elif ADMIN_EMAIL:
+        st.info("老师可先下载 Excel 或 Word，再作为附件发送到你的邮箱。这个方案不需要配置 Google Cloud。")
 else:
     st.info("请填写问卷并点击页面底部的“提交问卷”。")
