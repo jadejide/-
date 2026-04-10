@@ -1,5 +1,8 @@
 import json
 from datetime import datetime
+from io import BytesIO
+
+import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="“模型观念”素养测量指标体系专家调查问卷", layout="wide")
@@ -13,12 +16,11 @@ st.markdown(
 - 本问卷仅用于学术研究，采取匿名统计方式。
 - 请结合理论认识与实践经验独立判断。
 - 评分采用 5 级量表：5=非常认可，4=比较认可，3=一般，2=不太认可，1=非常不认可。
-- 提交后可在页面底部下载本次填写结果（JSON）。
+- 提交后可下载本次填写结果（JSON / Excel）。
 """
 )
 
 LIKERT = [1, 2, 3, 4, 5]
-YN = ["A", "B", "C", "D", "E"]
 
 second_dimensions = [
     {
@@ -91,6 +93,84 @@ evidence_items = [
 kp_to_dim = {code: dim for code, _, _, dim in key_performances}
 kp_name = {code: name for code, name, _, _ in key_performances}
 dim_name = {d["code"]: d["name"] for d in second_dimensions}
+
+
+def build_excel_bytes(result: dict) -> bytes:
+    basic_rows = []
+    basic_info = result["basic_info"]
+    for key, value in basic_info.items():
+        if key == "judgement_basis":
+            continue
+        basic_rows.append({"字段": key, "内容": value})
+    for key, value in basic_info["judgement_basis"].items():
+        basic_rows.append({"字段": f"判断依据::{key}", "内容": value})
+
+    second_rows = []
+    for code, item in result["second_dimensions"].items():
+        second_rows.append(
+            {
+                "二级维度编码": code,
+                "二级维度名称": item["name"],
+                "重要性": item["importance"],
+                "独立性": item["independence"],
+                "修改意见": item["suggestion"],
+            }
+        )
+
+    kp_rows = []
+    for code, item in result["key_performances"].items():
+        kp_rows.append(
+            {
+                "关键表现编码": code,
+                "关键表现名称": item["name"],
+                "所属二级维度": item["dimension"],
+                "适切性": item["appropriateness"],
+                "一致性": item["consistency"],
+                "修改意见": item["suggestion"],
+            }
+        )
+
+    kp_overall_rows = [{"项目": key, "内容": value} for key, value in result["key_performance_overall"].items()]
+
+    evidence_rows = []
+    for code, item in result["evidence"].items():
+        evidence_rows.append(
+            {
+                "证据编码": code,
+                "所属关键表现": item["key_performance"],
+                "证据描述": item["description"],
+                "代表性": item["representative"],
+                "可观测性": item["observable"],
+                "修改意见": item["suggestion"],
+            }
+        )
+
+    evidence_overall_rows = [{"项目": key, "内容": value} for key, value in result["evidence_overall"].items()]
+    overall_rows = [{"项目": key, "内容": value} for key, value in result["overall_comments"].items()]
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        pd.DataFrame([{"提交时间": result["submitted_at"]}]).to_excel(writer, sheet_name="提交信息", index=False)
+        pd.DataFrame(basic_rows).to_excel(writer, sheet_name="基本信息", index=False)
+        pd.DataFrame(second_rows).to_excel(writer, sheet_name="二级维度评分", index=False)
+        pd.DataFrame(kp_rows).to_excel(writer, sheet_name="关键表现评分", index=False)
+        pd.DataFrame(kp_overall_rows).to_excel(writer, sheet_name="关键表现总体意见", index=False)
+        pd.DataFrame(evidence_rows).to_excel(writer, sheet_name="可观测证据评分", index=False)
+        pd.DataFrame(evidence_overall_rows).to_excel(writer, sheet_name="证据总体意见", index=False)
+        pd.DataFrame(overall_rows).to_excel(writer, sheet_name="总体意见", index=False)
+
+        for sheet_name, worksheet in writer.sheets.items():
+            for column_cells in worksheet.columns:
+                max_length = 0
+                column_letter = column_cells[0].column_letter
+                for cell in column_cells:
+                    value = "" if cell.value is None else str(cell.value)
+                    max_length = max(max_length, len(value))
+                worksheet.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 40)
+
+    output.seek(0)
+    return output.getvalue()
+
 
 with st.form("survey_form"):
     st.header("第一部分 专家基本情况调查")
@@ -225,11 +305,22 @@ if submitted:
     st.json(result)
 
     json_bytes = json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8")
-    st.download_button(
-        label="下载填写结果（JSON）",
-        data=json_bytes,
-        file_name="model_literacy_survey_response.json",
-        mime="application/json",
-    )
+    excel_bytes = build_excel_bytes(result)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            label="下载填写结果（JSON）",
+            data=json_bytes,
+            file_name="model_literacy_survey_response.json",
+            mime="application/json",
+        )
+    with col2:
+        st.download_button(
+            label="下载填写结果（Excel）",
+            data=excel_bytes,
+            file_name="model_literacy_survey_response.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 else:
     st.info("请填写问卷并点击页面底部的“提交问卷”。")
